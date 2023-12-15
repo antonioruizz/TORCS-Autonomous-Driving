@@ -2,44 +2,28 @@ from gym_torcs import TorcsEnv
 from sample_agent import Agent
 import numpy as np
 
-vision = True
-episode_count = 10
-max_steps = 50
-reward = 0
-done = False
-step = 0
+# Configuraciones iniciales
+num_episodes = 100
+max_steps = 10  # Pasos máximos por episodio
 
-# Generate a Torcs environment
-env = TorcsEnv(vision=vision, throttle=False)
+# Inicializar el entorno y el agente
+env = TorcsEnv(vision=False, throttle=True, gear_change=False)
+agent = Agent(dim_action=env.action_space.shape[0], dim_observation=env.observation_space.shape[0])
 
-agent = Agent(1)  # steering only
-
-
-print("TORCS Experiment Start.")
-for i in range(episode_count):
-    print("Episode : " + str(i))
-
-    if np.mod(i, 3) == 0:
-        # Sometimes you need to relaunch TORCS because of the memory leak error
-        ob = env.reset(relaunch=True)
-    else:
-        ob = env.reset()
-
-    total_reward = 0.
-    for j in range(max_steps):
-        action = agent.act(ob, reward, done, vision)
-
-        ob, reward, done, _ = env.step(action)
-        #print(ob)
+# Bucle de episodios
+for episode in range(num_episodes):
+    total_reward = 0
+    state = env.reset()
+    for step in range(max_steps):
+        action = agent.act(state)
+        next_state, reward, done, _ = env.step(action)
+        agent.train(state, action, reward, next_state, done)
+        state = next_state
         total_reward += reward
-
-        step += 1
         if done:
             break
+    print(f'Episodio: {episode}, Recompensa Total: {total_reward}')
 
-    print("TOTAL REWARD @ " + str(i) +" -th Episode  :  " + str(total_reward))
-    print("Total Step: " + str(step))
-    print("")
+# Cerrar el entorno
+env.close()
 
-env.end()  # This is for shutting down TORCS
-print("Finish.")

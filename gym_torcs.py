@@ -1,3 +1,5 @@
+import sys #{add this two line before import gym}
+sys.path.append('/home/aruiz/anaconda3/envs/turinglab/gym') # change #the path according to your system
 import gym
 from gym import spaces
 import numpy as np

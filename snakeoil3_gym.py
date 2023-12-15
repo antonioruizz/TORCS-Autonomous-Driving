@@ -58,6 +58,9 @@ import sys
 import getopt
 import os
 import time
+import numpy as np
+from agent import Agent
+
 PI= 3.14159265359
 
 data_size = 2**17
@@ -127,7 +130,7 @@ class Client():
         self.trackname= 'unknown'
         self.stage= 3 # 0=Warm-up, 1=Qualifying 2=Race, 3=unknown <Default=3>
         self.debug= False
-        self.maxSteps= 100000  # 50steps/second
+        self.maxSteps= 10000000  # 50steps/second
         self.parse_the_command_line()
         if H: self.host= H
         if p: self.port= p
@@ -201,7 +204,7 @@ class Client():
         try:
             for opt in opts:
                 if opt[0] == '-h' or opt[0] == '--help':
-                    print(usage)
+                    # print(usage)
                     sys.exit(0)
                 if opt[0] == '-d' or opt[0] == '--debug':
                     self.debug= True
@@ -220,7 +223,7 @@ class Client():
                 if opt[0] == '-m' or opt[0] == '--steps':
                     self.maxSteps= int(opt[1])
                 if opt[0] == '-v' or opt[0] == '--version':
-                    print('%s %s' % (sys.argv[0], version))
+                    # print('%s %s' % (sys.argv[0], version))
                     sys.exit(0)
         except ValueError as why:
             print('Bad parameter \'%s\' for option %s: %s\n%s' % (
@@ -264,7 +267,7 @@ class Client():
                 self.S.parse_server_str(sockdata)
                 if self.debug:
                     sys.stderr.write("\x1b[2J\x1b[H") # Clear for steady output.
-                    print(self.S)
+                    # print(self.S)
                 break # Can now return from this function.
 
     def respond_to_server(self):
@@ -275,7 +278,8 @@ class Client():
         except socket.error as emsg:
             print("Error sending to server: %s Message %s" % (emsg[1],str(emsg[0])))
             sys.exit(-1)
-        if self.debug: print(self.R.fancyout())
+        # if self.debug: 
+            # print(self.R.fancyout())
         # Or use this for plain output:
         #if self.debug: print self.R
 
@@ -564,11 +568,126 @@ def drive_example(c):
         R['gear']=6
     return
 
+def drive(C, agent):
+    '''
+    La función 'drive' toma como entrada el cliente 'C' y el 'agent'.
+    Aquí se toma la decisión de qué acción realizar en cada paso de tiempo.
+
+    Parámetros:
+    C -- cliente de conexión con TORCS.
+    agent -- agente de aprendizaje por refuerzo.
+
+    Retorna:
+    None, pero envía comandos al simulador TORCS a través del cliente 'C'.
+    '''
+
+    # Obtener el estado actual del simulador TORCS
+    state = get_state(C)
+
+    # Tomar una acción basada en el estado actual
+    # La función 'act' debería ser definida en tu clase agente
+    state = agent.normalize_state(state)
+    action = agent.act(state)
+
+    # Establecer las acciones en el simulador
+    C.R.d['steer'] = action[0]  # acción de dirección
+    C.R.d['accel'] = action[1]  # acción de aceleración
+    C.R.d['brake'] = action[2]  # acción de frenado
+
+    # Si tu agente también controla el cambio de marchas
+    if agent.control_gear:
+        C.R.d['gear'] = int(action[3])
+        C.R.d['clutch'] = action[4]
+
+    # C.R.d['meta'] = action[5] 
+
+    # Enviar las acciones al simulador TORCS
+    C.respond_to_server()
+
+    return action
+
+def get_state(C):
+    '''
+    Esta función convierte los datos recibidos del simulador TORCS en el estado que el agente puede entender.
+
+    Parámetros:
+    C -- cliente de conexión con TORCS.
+
+    Retorna:
+    state -- un array de numpy o una lista que representa el estado actual del entorno.
+    '''
+
+    # Aquí convertirías la entrada del servidor en un estado.
+    # Esta es solo una plantilla y deberías ajustarla según tus necesidades.
+    state = [
+        C.S.d['angle'],
+        C.S.d['track'],
+        C.S.d['trackPos'],
+        C.S.d['speedX'],
+        C.S.d['speedY'],
+        C.S.d['speedZ'],
+        C.S.d['wheelSpinVel'],
+        C.S.d['distFromStart'],
+        C.S.d['curLapTime'],
+        C.S.d['lastLapTime']
+    ]
+
+    return np.array(state)
+
+def is_car_off_track(track_pos):
+    return track_pos < -1.0 or track_pos > 1.0
+
+
+
 # ================ MAIN ================
+# if __name__ == "__main__":
+#     C= Client(p=3101)
+#     for step in range(C.maxSteps,0,-1):
+#         C.get_servers_input()
+#         drive_example(C)
+#         C.respond_to_server()
+#     C.shutdown()
+
 if __name__ == "__main__":
-    C= Client(p=3101)
-    for step in range(C.maxSteps,0,-1):
+    model_name ="modelo1"
+    C = Client(p=3101)
+    agent = Agent(dim_action=5, dim_observation=31, learning_rate=0.001)
+    # agent = Agent(dim_action=5, dim_observation=31, learning_rate=0.01, model_file =model_name)
+    posInicial = 0
+    
+    done = False
+    first = True
+
+    for step in range(C.maxSteps, 0, -1):
         C.get_servers_input()
-        drive_example(C)
+        state = get_state(C)  # Estado actual
+        state = agent.normalize_state(state)
+        # Ejecuta la acción del agente y obtén el siguiente estado
+        action = drive(C, agent)
         C.respond_to_server()
+        C.get_servers_input()
+        next_state = get_state(C)  # Estado siguiente
+        next_state = agent.normalize_state(next_state)
+
+        if first:
+            previous_dist_from_start = C.S.d['distFromStart']
+            previous_track_pos = state[2]
+            first = False
+
+        current_dist_from_start = C.S.d['distFromStart']
+        trackPosition = state[2]
+        sensor1 = state[1]
+        speedX = C.S.d['speedX']
+        reward = agent.update_reward(current_dist_from_start, previous_dist_from_start, trackPosition, previous_track_pos, sensor1)
+
+        previous_dist_from_start = current_dist_from_start
+        previous_track_pos = trackPosition
+
+        # Entrena el agente con la recompensa obtenida
+        agent.train(state, action, reward, next_state, done)
+
+        # Actualiza la tasa de exploración al final del episodio
+        agent.update_exploration_rate()
+
+    agent.save_model(model_name)
     C.shutdown()
