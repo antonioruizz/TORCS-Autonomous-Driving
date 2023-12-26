@@ -8,10 +8,17 @@ from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.models import Model
 from keras.initializers import he_normal
 from keras.regularizers import l2
+from actor_network import ActorNetwork
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 
 
-class Agent(object):
+
+class Agent:
     def __init__(self, dim_action, dim_observation, learning_rate=0.01, model_file=None):
         self.dim_action = dim_action
         self.dim_observation = dim_observation
@@ -29,8 +36,7 @@ class Agent(object):
         self.min_exp = 0.05
         self.exp_decay = 0.995
 
-        # self.best_distance = 3289.55# La mejor distancia alcanzada ACTUALIZAR MANUALMENTE
-        self.actor_optimizer = tf.optimizers.Adam(learning_rate=self.learning_rate)
+        
 
         if model_file:
             print("-----------------------------------------")
@@ -40,11 +46,14 @@ class Agent(object):
             except Exception as e:
                 print("Error al cargar el modelo: ", str(e))
                 print("Creando modelo desde cero")
-                self.actor_model = self.create_actor_model()
+                self.actor_model = ActorNetwork(dim_observation, dim_action)
         else:
             print("Archivo de modelo no encontrado o no especificado. Creando modelo desde cero")
-            self.actor_model = self.create_actor_model()
+            self.actor_model = ActorNetwork(dim_observation, dim_action)
         print("-----------------------------------------")
+        
+        self.optimizer = optim.Adam(self.actor_model.parameters(), lr=learning_rate)
+        
 
     def update_exploration_rate(self):
 
@@ -54,52 +63,6 @@ class Agent(object):
         # Asegurarse de que la tasa de exploración no caiga por debajo del mínimo
         self.exp_tasa = max(self.exp_tasa, self.min_exp)
 
-
-    def create_actor_model(self):
-        # Inicializador de pesos
-        initializer = he_normal()
-
-        l2_regularizer = l2(0.01)  # L2 Regularization
-
-        # Entrada
-        input_layer = Input(shape=(self.dim_observation,))
-
-        # Capas ocultas más profundas y con más neuronas
-        hidden_layer = Dense(64, activation='relu', kernel_initializer=initializer, kernel_regularizer=l2_regularizer)(input_layer)
-        # hidden_layer = BatchNormalization()(hidden_layer)
-        hidden_layer = Dropout(0.1)(hidden_layer)
-
-        # hidden_layer = Dense(16, activation='relu', kernel_initializer=initializer, kernel_regularizer=l2_regularizer)(hidden_layer)
-        # # hidden_layer = BatchNormalization()(hidden_layer)
-        # hidden_layer = Dropout(0.1)(hidden_layer)
-
-        # hidden_layer = Dense(8, activation='relu', kernel_initializer=initializer, kernel_regularizer=l2_regularizer)(hidden_layer)
-        # hidden_layer = BatchNormalization()(hidden_layer)
-
-        # Capa de salida para los dos primeros valores (0 a 1)
-        output_2 = Dense(2, activation='sigmoid', kernel_initializer=initializer)(hidden_layer)
-
-        # Capa de salida para el tercer valor (-1 a 1)
-        output_1 = Dense(1, activation='tanh', kernel_initializer=initializer)(hidden_layer)
-
-        # Capa de salida para la marcha
-        gear_output = Dense(1, activation='sigmoid', kernel_initializer=initializer)(hidden_layer)
-
-        # Capa de salida para el embrague
-        clutch_output= Dense(1, activation='sigmoid', kernel_initializer=initializer)(hidden_layer)
-
-        # meta= Dense(1, activation='sigmoid', kernel_initializer=initializer)(hidden_layer)
-
-        # Combinar las salidas
-        combined_output = Concatenate()([output_1, output_2, gear_output, clutch_output])
-
-        # Crear el modelo
-        model = Model(inputs=input_layer, outputs=combined_output)
-
-        # Compilar el modelo con una función de pérdida personalizada
-        model.compile(loss='mse', optimizer=Adam(learning_rate=self.learning_rate))
-
-        return model
 
     def normalize_tanh(self, speed):
         return np.tanh(speed)
@@ -147,6 +110,13 @@ class Agent(object):
         # print("CurLapTime: ",state[29])
         # print("LastLapTime: ",state[30])
 
+        # Convertir 'state' a un tensor PyTorch
+        state = np.array(state)
+        state_tensor = torch.from_numpy(state).float().unsqueeze(0)
+
+        # Colocar el modelo en modo de evaluación
+        self.actor_model.eval()
+
         if self.random_counter != -1:
                 self.random_counter -= 1
                 action = self.last_action
@@ -175,14 +145,11 @@ class Agent(object):
             # print("Acción aleatoria: ", action)
             return action
         
-        # Aplanar el estado si es necesario
-        flattened_state = self.flatten_state(state)
+        # Obtener la predicción
+        with torch.no_grad():
+            action = self.actor_model(state_tensor).squeeze(0).numpy()
 
-        # Convertir a un arreglo NumPy con tipo float32
-        np_state = np.array(flattened_state, dtype=np.float32).reshape(1, -1)
-
-        # Utilizar el modelo del actor para predecir la acción basada en el estado
-        action = self.actor_model.predict(np_state, verbose=0)[0]
+        # action = action.numpy()[0]
 
         # Transformar el valor de la marcha
         valor_marcha_continuo = action[3]  # action[3] es el valor de la marcha en rango 0 a 1
@@ -295,43 +262,23 @@ class Agent(object):
 
 
     def train(self, state, action, reward, next_state, done):
+        # Convertir a tensores de PyTorch
+        state = torch.tensor(state, dtype=torch.float)
+        next_state = torch.tensor(next_state, dtype=torch.float)
+        action = torch.tensor(action, dtype=torch.float)
+        action = action.numpy()[0]
+        reward = torch.tensor(reward, dtype=torch.float)
 
-        action[3] = (action[3]+1) / 7
-        action = action[:-1]
+        self.actor_model.train()
+        predicted_action = self.actor_model(state)
 
-        # Aplanar estados
-        flattened_state = self.flatten_state(state)
-        flattened_next_state = self.flatten_state(next_state)
+        # Calcular la pérdida (función de pérdida específica del problema)
+        loss = -torch.mean(reward - (action - predicted_action).pow(2))
 
-        # Convertir a arreglos NumPy
-        np_state = np.array(flattened_state, dtype=np.float32).reshape(1, -1)
-        np_next_state = np.array(flattened_next_state, dtype=np.float32).reshape(1, -1)
-
-        # Predecir la acción futura
-        predicted_action = self.actor_model.predict(np_next_state, verbose=0)[0]
-        
-
-        # Actualizar el actor directamente en función de la recompensa
-        with tf.GradientTape() as tape:
-            # Calcular la predicción de la acción actual
-            current_action_prediction = self.actor_model(np_next_state)
-
-            # Usar alguna función o lógica para calcular la recompensa en relación con la acción
-            # Esto puede ser una función simple o una más compleja dependiendo del problema
-            actor_reward = self.calculate_actor_reward(reward, action, current_action_prediction)
-
-            # Se busca maximizar la recompensa (minimizar -actor_reward)
-            actor_loss = -tf.reduce_mean(actor_reward)
-
-        actor_grad = tape.gradient(actor_loss, self.actor_model.trainable_variables)
-        self.actor_optimizer.apply_gradients(zip(actor_grad, self.actor_model.trainable_variables))
-
-        # target = reward
-        # if not done:
-        #     target = (reward + 0.95 * np.amax(self.actor_model.predict(np_next_state.reshape(1, -1), verbose=0)[0]))
-        # target_f = self.actor_model.predict(np_state.reshape(1, -1), verbose=0)
-        # target_f[0][np.argmax(action)] = target
-        # self.actor_model.fit(np_state.reshape(1, -1), target_f, epochs=1, verbose=0)
+        # Backpropagation
+        self.optimizer.zero_grad()
+        loss.backward(retain_graph=True)
+        self.optimizer.step()
 
 
     def calculate_actor_reward(self, reward, action, predicted_action):
@@ -343,5 +290,9 @@ class Agent(object):
 
 
     def save_model(self, file_name):
-        print("Guardando modelo del actor en", file_name + "actor.h5")
-        self.actor_model.save(file_name + "actor.h5")
+        torch.save(self.actor_model.state_dict(), file_name + 'actor.pth')
+
+    def load_model(self, file_name):
+        self.actor_model = ActorNetwork(self.dim_observation, self.dim_action)
+        self.actor_model.load_state_dict(torch.load(file_name + 'actor.pth'))
+
