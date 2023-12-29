@@ -1,7 +1,7 @@
 import subprocess
 
 # Número de veces que quieres ejecutar el script
-n = 10
+n = 1000
 
 # Ruta al script que quieres ejecutar
 script_path = 'snakeoil3_gym.py'

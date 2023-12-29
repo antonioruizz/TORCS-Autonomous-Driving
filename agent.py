@@ -1,14 +1,6 @@
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Input, Concatenate, Dense, BatchNormalization, Dropout, Lambda
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.models import load_model
-from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.models import Model
-from keras.initializers import he_normal
-from keras.regularizers import l2
 from actor_network import ActorNetwork
+from critic_network import CriticNetwork
 
 
 import torch
@@ -20,6 +12,7 @@ import torch.optim as optim
 
 class Agent:
     def __init__(self, dim_action, dim_observation, learning_rate=0.01, model_file=None):
+
         self.dim_action = dim_action
         self.dim_observation = dim_observation
         self.learning_rate = learning_rate
@@ -27,33 +20,46 @@ class Agent:
         self.was_out_of_track = False
         self.last_action = []
         self.random_counter = -1
-        self.next_checkpoint = 2035
         self.track_length = 2057.56
-        
+        self.MAX_REWARD = 1000
+        self.cruzaMetaInicio = False
+        self.cercaFinal = False
+
+        #CheckPoints
+        self.lastCheckPointTime = 0.0
+        self.next_checkpoint = 2035
+        self.last_checkpoint = 2034
+        self.lastReward = 0
+
         # Exploración disminute exponencialmente
-        self.exp_inicial = 0.3
+        self.exp_inicial = 1
         self.exp_tasa = self.exp_inicial
-        self.min_exp = 0.05
+        self.min_exp = 0
         self.exp_decay = 0.995
 
-        
+
 
         if model_file:
             print("-----------------------------------------")
             try:
-                print("Cargando ", model_file + "actor.h5")
-                self.actor_model = load_model(model_file + "actor.h5")
+                print("Cargando ", model_file + "actor.pth")
+                print("Cargando ", model_file + "critic.pth")
+                self.load_model(model_file)
             except Exception as e:
                 print("Error al cargar el modelo: ", str(e))
                 print("Creando modelo desde cero")
                 self.actor_model = ActorNetwork(dim_observation, dim_action)
+                self.critic_model = CriticNetwork(dim_observation, dim_action)
         else:
             print("Archivo de modelo no encontrado o no especificado. Creando modelo desde cero")
             self.actor_model = ActorNetwork(dim_observation, dim_action)
+            self.critic_model = CriticNetwork(dim_observation, dim_action)
         print("-----------------------------------------")
-        
+
         self.optimizer = optim.Adam(self.actor_model.parameters(), lr=learning_rate)
-        
+        self.critic_optimizer = optim.Adam(self.critic_model.parameters(), lr=learning_rate)
+        # print("Pesos de fc1 después de la inicialización:", self.critic_model.fc1.weight)
+
 
     def update_exploration_rate(self):
 
@@ -74,8 +80,7 @@ class Agent:
         normalized_state = []
 
         # Normalizar los diferentes componentes del estado
-        
-        # normalized_state.append(state[0] / np.pi)  # Angle
+
         normalized_state.append(state[0])  # Angle
         normalized_state.extend([s / 200 for s in state[1]])  # Track sensors
         norm_trackPos = self.normalize_tanh(state[2])
@@ -93,6 +98,8 @@ class Agent:
         # Normalizar CurLapTime, LastLapTime
         normalized_state.extend([self.normalize_tanh(s / max_lap_time) for s in state[8:10]])
 
+        normalized_state = np.nan_to_num(normalized_state, nan=-1)
+
         return normalized_state
 
 
@@ -100,15 +107,15 @@ class Agent:
 
         # print("STATE:")
         # print("Angle: ",state[0])
-        # print("Track: ",state[1:20])
+        # # print("Track: ",state[1:20])
         # print("TrackPos: ",state[20])
         # print("SpeedX: ",state[21])
-        # print("SpeedY: ",state[22])
-        # print("SpeedZ: ",state[23])
-        # print("WheelSpin: ",state[24:28])
+        # # print("SpeedY: ",state[22])
+        # # print("SpeedZ: ",state[23])
+        # # print("WheelSpin: ",state[24:28])
         # print("DistFromStart: ", state[28])
         # print("CurLapTime: ",state[29])
-        # print("LastLapTime: ",state[30])
+        # # print("LastLapTime: ",state[30])
 
         # Convertir 'state' a un tensor PyTorch
         state = np.array(state)
@@ -119,111 +126,125 @@ class Agent:
 
         if self.random_counter != -1:
                 self.random_counter -= 1
-                action = self.last_action
-                # print("Acción aleatoria: ", action)
-                return action
+                # print("Acción aleatoria: ", self.last_action)
+                return self.last_action
 
         if np.random.rand() <= self.exp_tasa:
 
             self.random_counter = 5
 
-            # Generar los dos primeros valores en el rango [0, 1]
-            first_two_actions = np.random.uniform(0, 1, 2)
-            
-            # Generar el tercer valor en el rango [-1, 1]
-            third_action = np.random.uniform(-1, 1)
+            action = np.random.uniform(-1, 1, 5)
 
-            marcha = np.random.choice([-1, 0, 1, 2, 3, 4, 5, 6])
-            # marcha = np.random.choice([-1, 1])
-
-            clutch = np.random.uniform(0, 1)
-
-            # Combinar en una sola acción
-            action = np.concatenate([[third_action], first_two_actions, [marcha], [clutch], [0]])
             self.last_action = action
 
-            # print("Acción aleatoria: ", action)
             return action
-        
+
         # Obtener la predicción
-        with torch.no_grad():
-            action = self.actor_model(state_tensor).squeeze(0).numpy()
+        # with torch.no_grad():
+        action = self.actor_model(state_tensor).squeeze(0).detach().numpy()
 
-        # action = action.numpy()[0]
-
-        # Transformar el valor de la marcha
-        valor_marcha_continuo = action[3]  # action[3] es el valor de la marcha en rango 0 a 1
-        valor_marcha_escalado = (valor_marcha_continuo * 7) -1  # Escalar y desplazar a rango -1 a 6
-        marcha_redondeada = int(round(valor_marcha_escalado))  # Redondear a entero más cercano
-        action[3] = marcha_redondeada
-        action = np.concatenate([action, [0]])
-        
         # print("Acción: ", action)
         return action
 
-    def flatten_state(self, state):
-        # Aplanar los datos para que sea una lista de float
-        flattened_state = []
-        for element in state:
-            if isinstance(element, list):
-                # Extiende la lista aplanada con los elementos de la sublista
-                flattened_state.extend(element)
-            else:
-                # Añade el elemento individual
-                flattened_state.append(element)
-        return flattened_state
+    def update_reward(self, state):
 
-    def update_reward(self, current_dist, previous_dist, track_pos, previous_track_pos, sensor1):
         reward = 0
-        speed_bonus_factor = 100  # Factor para escalar el premio por velocidad
-        penalty_out_of_track = -5  # Penalización por salirse del carril
-        penalty_stop = -10
-        reward_back_on_track = 5  # Recompensa por volver al carril
-        reward_new_lap_record = 100  # Recompensa por nueva vuelta más rápida
 
-        change_dist =  current_dist - previous_dist
+        currentTime = state[29]
 
-        # Si está en carril
-        if sensor1 >= 0:
+        sensor1 = state[1]
 
-            # Premio por moverse rápido y centrado
-            reward = ((change_dist * speed_bonus_factor)) * (1 - abs(track_pos))
+        current_dist = state[28] * self.track_length
 
-            # Si quieto o retrocede -> CASTIGO
-            if change_dist <= 0:
-                reward = -0.1
+        # Distancia hasta la meta
+        distStart = state[28]
+        if not self.cruzaMetaInicio:
+            if distStart > 0.1:
+                distStart = 0
+            else:
+                self.cruzaMetaInicio = True
+        elif not self.cercaFinal:
+            if distStart > 0.9:
+                distStart = 0
+                self.cruzaMetaInicio = False
+            elif distStart > 0.1:
+                self.cercaFinal = True
 
-        # Si fuera de carril
+        # Calculo de velocidad
+        speedFactor = 100
+        speedX = state[21]
+        wheelSpin = state[24:28]
+        # meanWheelSpin = abs(sum(wheelSpin) / 4)
+        # speed = speedX * meanWheelSpin / speedFactor
+        speed = speedX / speedFactor
+
+        # Distancia a centro del carril
+        trackPos = state[20]
+        centerTrack = 1- abs(trackPos)
+
+        # print("distStart: ", distStart)
+        # print("speedX: ", speedX)
+        # print("wheelSpin: ", wheelSpin)
+        # print("trackPos: ", trackPos)
+        # print("speed: ", speed)
+
+        reward = ((distStart * 0.4) + (speed * 0.6 * centerTrack)) * 1000
+        # reward = distStart
+        # if reward < 0000.1:
+        #     reward = 0000.1
+        # print("REWARD: ", reward)
+
+
+        # reward = 0
+        # speed_bonus_factor = 10  # Factor para escalar el premio por velocidad
+        # penalty_out_of_track = -5  # Penalización por salirse del carril
+        # penalty_stop = -10
+        # reward_back_on_track = 5  # Recompensa por volver al carril
+        # reward_new_lap_record = 100  # Recompensa por nueva vuelta más rápida
+
+        # change_dist =  current_dist - previous_dist
+
+        # # Si está en carril
+        # if sensor1 >= 0:
+
+        #     # Premio por moverse rápido y centrado
+        #     reward = ((change_dist * speed_bonus_factor)) * (1 - abs(track_pos))
+
+        #     # Si quieto o retrocede -> CASTIGO
+        #     # if change_dist <= 0:
+        #     #     reward = -0.1
+
+        # # Si fuera de carril
         if sensor1 < 0:
             # Si antes estaba dentro -> CASTIGO FUERTE
             if not self.was_out_of_track:
-                print("SE SALE DEL CARRIL")
-                reward = -1
+                reward = -100
                 self.was_out_of_track = True
-            # Si ya estaba fuera, premio por acercarse. Castigo si no se acerca
-        #     else:
-        #         reward = (abs(previous_track_pos) - abs(track_pos)) * 10
-        #         if reward <= 0.1:
-        #             reward = -0.1
-        # else:
-        #     # Si antes estaba fuera -> PREMIO
-        #     if self.was_out_of_track:
-        #         print("ENTRA EN CARRIL")
-        #         reward = 0.1
-        #         self.was_out_of_track = False
+        #     # Si ya estaba fuera, premio por acercarse. Castigo si no se acerca
+        # #     else:
+        # #         reward = (abs(previous_track_pos) - abs(track_pos)) * 10
+        # #         if reward <= 0.1:
+        # #             reward = -0.1
+        # # else:
+        # #     # Si antes estaba fuera -> PREMIO
+        # #     if self.was_out_of_track:
+        # #         print("ENTRA EN CARRIL")
+        # #         reward = 0.1
+        # #         self.was_out_of_track = False
 
-        if self.next_checkpoint > self.track_length and current_dist < 2 :
-                self.next_checkpoint = 2
+        if self.next_checkpoint > self.track_length and current_dist < 100 :
+                    self.next_checkpoint = 1
+                    self.cruzaMetaInicio = True
 
-        elif self.next_checkpoint <= 0:
-                self.next_checkpoint = int(self.track_length)
+        # elif self.next_checkpoint <= 0:
+        #         self.next_checkpoint = int(self.track_length)
 
         if (current_dist >= self.next_checkpoint):
-            if sensor1 >= 0:
-                reward = 1
-                # print("==================================")
-                # print("ALCANZADO CHECKPOINT ", str(self.next_checkpoint))
-                # print("==================================")
+            # if sensor1 >= 0:
+            #     reward = 1
+            # print("==================================")
+            # print("ALCANZADO CHECKPOINT ", str(self.next_checkpoint))
+            # print("==================================")
             # else:
             #     reward = 0.1
             #     color = "\033[91m"  # Rojo
@@ -231,68 +252,147 @@ class Agent:
             #     print(f"{color}==================================")
             #     print(f"ALCANZADO CHECKPOINT ", str(self.next_checkpoint))
             #     print(f"=================================={end_color}")
-            self.next_checkpoint += 2
 
-        # elif (current_dist <= self.next_checkpoint -4):
-        #     if sensor1 >= 0:
-        #         reward = -100
-        #         print("==================================")
-        #         print("RETROCEDIDO CHECKPOINT ", str(self.next_checkpoint))
-        #         print("==================================")
-        #     else:
-        #         reward = -100
-        #         color = "\033[91m"  # Rojo
-        #         end_color = "\033[0m"  # Fin del color
-        #         print(f"{color}==================================")
-        #         print(f"RETROCEDIDO CHECKPOINT ", str(self.next_checkpoint))
-        #         print(f"=================================={end_color}")
-        #     self.next_checkpoint -= 2
-        
-        normalized_reward = reward * 100
+            if not self.cruzaMetaInicio:
+        #         reward = (1 - (currentTime - self.lastCheckPointTime)) * 1000
+        #         self.lastCheckPointTime = currentTime
+                self.last_checkpoint = self.next_checkpoint
+                self.next_checkpoint += 1
+        #         self.lastReward = reward
 
-        if normalized_reward < 0.00:
-            color = "\033[91m"  # Rojo
-        else:
-            color = "\033[93m"  # Verde        
+            elif not self.cercaFinal:
+                if current_dist > 2000:
+                    self.next_checkpoint = 1
+                elif current_dist > 1000:
+        #             reward = (1 - (currentTime - self.lastCheckPointTime)) * 1000
+        #             self.lastCheckPointTime = currentTime
+                    self.last_checkpoint = self.next_checkpoint
+                    self.next_checkpoint += 1
+        #             self.lastReward = reward
+                    self.cercaFinal = True
+                else:
+        #             reward = (1 - (currentTime - self.lastCheckPointTime)) * 1000
+        #             self.lastCheckPointTime = currentTime
+                    self.last_checkpoint = self.next_checkpoint
+                    self.next_checkpoint += 1
+        #             self.lastReward = reward
 
-        end_color = "\033[0m"  # Fin del color
-        # print(f"{color}MI REWARD: {normalized_reward}{end_color}")
+            elif self.cruzaMetaInicio and self.cercaFinal:
+        #             reward = (1 - (currentTime - self.lastCheckPointTime)) * 1000
+        #             self.lastCheckPointTime = currentTime
+                    self.last_checkpoint = self.next_checkpoint
+                    self.next_checkpoint += 1
+        #             self.lastReward = reward
 
-        return normalized_reward
+
+        # if self.lastCheckPointTime != currentTime:
+        #     self.lastReward -= 1
+        #     reward = self.lastReward
+
+        # # elif (current_dist <= self.next_checkpoint -4):
+        # #     if sensor1 >= 0:
+        # #         reward = -100
+        # #         print("==================================")
+        # #         print("RETROCEDIDO CHECKPOINT ", str(self.next_checkpoint))
+        # #         print("==================================")
+        # #     else:
+        # #         reward = -100
+        # #         color = "\033[91m"  # Rojo
+        # #         end_color = "\033[0m"  # Fin del color
+        # #         print(f"{color}==================================")
+        # #         print(f"RETROCEDIDO CHECKPOINT ", str(self.next_checkpoint))
+        # #         print(f"=================================={end_color}")
+        # #     self.next_checkpoint -= 2
+
+        # normalized_reward = reward * 100
+
+        # if normalized_reward < 0.00:
+        #     color = "\033[91m"  # Rojo
+        # else:
+        #     color = "\033[93m"  # Verde
+
+        # end_color = "\033[0m"  # Fin del color
+        # # print(f"{color}MI REWARD: {normalized_reward}{end_color}")
+        # print(speedX)
+
+        # if speedX > 0:
+        #     max_speed = 300  # Asumiendo 300 como un valor máximo razonable para speedX
+        #     normalized_speed = min(speedX / max_speed, 1) * 1000
+        #     reward = normalized_speed * self.MAX_REWARD
+        # else:
+        #     reward = 1
+
+        if reward <= 0:
+            reward = 0.00001
+        # print("REWARD: ", reward)
+        return min(reward, self.MAX_REWARD)
 
 
-    def train(self, state, action, reward, next_state, done):
-        # Convertir a tensores de PyTorch
-        state = torch.tensor(state, dtype=torch.float)
-        next_state = torch.tensor(next_state, dtype=torch.float)
-        action = torch.tensor(action, dtype=torch.float)
-        action = action.numpy()[0]
-        reward = torch.tensor(reward, dtype=torch.float)
 
+        return min(reward, self.MAX_REWARD)
+
+    def train(self, state, action, reward, done):
+
+        state_tensor = torch.tensor(state, dtype=torch.float)
+        action_tensor = torch.tensor(action, dtype=torch.float)
+        reward_tensor = torch.tensor(reward, dtype=torch.float)
+
+        # Predecir la acción usando la red del Actor
         self.actor_model.train()
-        predicted_action = self.actor_model(state)
+        predicted_action = self.actor_model(state_tensor)
 
-        # Calcular la pérdida (función de pérdida específica del problema)
-        loss = -torch.mean(reward - (action - predicted_action).pow(2))
 
-        # Backpropagation
+        # Evaluar la acción usando la red del Crítico
+        self.critic_model.train()
+        value = self.critic_model(state_tensor, action_tensor)
+        predicted_value = self.critic_model(state_tensor, predicted_action)
+
+        target_value = reward_tensor
+        if not done:
+            target_value = reward_tensor + 0.95 * predicted_value
+        critic_loss = torch.nn.functional.mse_loss(value, target_value)
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        # Paso 2: Actualizar el Actor
+        self.actor_model.train()
+        predicted_action = self.actor_model(state_tensor)
+        actor_loss = -self.critic_model(state_tensor, predicted_action).mean()
+
+
+        # print("state_tensor: ", state_tensor)
+        # print("ACCION REAL: ", action_tensor)
+        # print("ACCION ACTOR: ", predicted_action)
+        # print("MI REWARD: ", reward_tensor)
+        # print("REWARD CRITICO REAL: ", value)
+        # print("REWARD CRITICO DEL ACTOR: ", predicted_value)
+        # print("ACTOR LOSS: ", actor_loss)
+        # print("CRITIC LOSS: ", critic_loss)
+        # print("++++++++++++++++++++++++++++++++++++++++++++")
+
+        # Backpropagation y optimización
         self.optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        actor_loss.backward()
         self.optimizer.step()
 
 
-    def calculate_actor_reward(self, reward, action, predicted_action):
-        # Implementar la lógica para calcular la recompensa del actor
-        # Esto puede incluir la comparación de la acción predicha con la acción real,
-        # y el uso de la recompensa recibida del entorno
-        # Ejemplo simple:
-        return reward - tf.reduce_mean(tf.square(action - predicted_action))
+        # Opcional: Imprimir los gradientes
+        # for name, param in self.actor_model.named_parameters():
+        #     if param.requires_grad:
+        #         print(name, param.grad)
+
+
 
 
     def save_model(self, file_name):
         torch.save(self.actor_model.state_dict(), file_name + 'actor.pth')
+        torch.save(self.critic_model.state_dict(), file_name + 'critic.pth')
 
     def load_model(self, file_name):
         self.actor_model = ActorNetwork(self.dim_observation, self.dim_action)
         self.actor_model.load_state_dict(torch.load(file_name + 'actor.pth'))
+        self.critic_model = CriticNetwork(self.dim_observation, self.dim_action)
+        self.critic_model.load_state_dict(torch.load(file_name + 'critic.pth'))
 

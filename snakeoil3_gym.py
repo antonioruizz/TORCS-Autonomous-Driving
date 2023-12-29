@@ -130,7 +130,7 @@ class Client():
         self.trackname= 'unknown'
         self.stage= 3 # 0=Warm-up, 1=Qualifying 2=Race, 3=unknown <Default=3>
         self.debug= False
-        self.maxSteps= 200  # 50steps/second
+        self.maxSteps= 200000  # 50steps/second
         self.parse_the_command_line()
         if H: self.host= H
         if p: self.port= p
@@ -591,53 +591,29 @@ def drive(C, agent):
 
     # Establecer las acciones en el simulador
     C.R.d['steer'] = action[0]  # acción de dirección
-    C.R.d['accel'] = action[1]  # acción de aceleración
-    C.R.d['brake'] = action[2]  # acción de frenado
+    C.R.d['accel'] = (action[1] + 1) / 2  # acción de aceleración
+    C.R.d['brake'] = (action[2] + 1) / 2  # acción de frenado
 
     # Si tu agente también controla el cambio de marchas
     if agent.control_gear:
-        C.R.d['gear'] = int(action[3])
-        C.R.d['clutch'] = action[4]
+        C.R.d['gear'] = int(((action[3] + 1) * 3.5)-1)
+        C.R.d['clutch'] = (action[4] + 1) / 2
 
-    C.R.d['meta'] = action[5] 
+    C.R.d['meta'] = 0
 
+    print("TORCS ACTION: ", [C.R.d['steer'], C.R.d['accel'], C.R.d['brake'], C.R.d['gear'], C.R.d['clutch']])
     # Enviar las acciones al simulador TORCS
     C.respond_to_server()
 
     return action
 
 def restart(C, agent):
-    '''
-    La función 'drive' toma como entrada el cliente 'C' y el 'agent'.
-    Aquí se toma la decisión de qué acción realizar en cada paso de tiempo.
-
-    Parámetros:
-    C -- cliente de conexión con TORCS.
-    agent -- agente de aprendizaje por refuerzo.
-
-    Retorna:
-    None, pero envía comandos al simulador TORCS a través del cliente 'C'.
-    '''
-
-    # Obtener el estado actual del simulador TORCS
-    state = get_state(C)
-
-    # Tomar una acción basada en el estado actual
-    # La función 'act' debería ser definida en tu clase agente
-    state = agent.normalize_state(state)
     action = agent.act(state)
 
-    # Establecer las acciones en el simulador
-    C.R.d['steer'] = action[0]  # acción de dirección
-    C.R.d['accel'] = action[1]  # acción de aceleración
-    C.R.d['brake'] = action[2]  # acción de frenado
-
-    # Si tu agente también controla el cambio de marchas
-    if agent.control_gear:
-        C.R.d['gear'] = int(action[3])
-        C.R.d['clutch'] = action[4]
 
     C.R.d['meta'] = 1 
+
+    print("REINICIO")
 
     # Enviar las acciones al simulador TORCS
     C.respond_to_server()
@@ -669,6 +645,7 @@ def get_state(C):
         C.S.d['curLapTime'],
         C.S.d['lastLapTime']
     ]
+    
 
     return np.array(state)
 
@@ -689,52 +666,34 @@ def is_car_off_track(track_pos):
 if __name__ == "__main__":
     model_name ="modelo1"
     C = Client(p=3101)
-    agent = Agent(dim_action=6, dim_observation=31, learning_rate=0.01, model_file =model_name)
-    # agent = Agent(dim_action=5, dim_observation=31, learning_rate=0.01, model_file =model_name)
-    posInicial = 0
-    
+    agent = Agent(dim_action=5, dim_observation=31, learning_rate=0.1, model_file =model_name)    
+
     done = False
-    first = True
 
     for step in range(C.maxSteps, 0, -1):
         C.get_servers_input()
         state = get_state(C)  # Estado actual
         state = agent.normalize_state(state)
-        # Ejecuta la acción del agente y obtén el siguiente estado
         action = drive(C, agent)
         C.respond_to_server()
-        C.get_servers_input()
-        next_state = get_state(C)  # Estado siguiente
-        next_state = agent.normalize_state(next_state)
 
-        if first:
-            previous_dist_from_start = C.S.d['distFromStart']
-            previous_track_pos = C.S.d['trackPos']
-            first = False
-
-        current_dist_from_start = C.S.d['distFromStart']
-        trackPosition = C.S.d['trackPos']
-        sensor1 = state[1]
-        speedX = C.S.d['speedX']
-        reward = agent.update_reward(current_dist_from_start, previous_dist_from_start, trackPosition, previous_track_pos, sensor1)
-
-        previous_dist_from_start = current_dist_from_start
-        previous_track_pos = trackPosition
+        reward = agent.update_reward(state)
 
         # Entrena el agente con la recompensa obtenida
-        agent.train(state, action, reward, next_state, done)
+        agent.train(state, action, reward, done)
 
         # Actualiza la tasa de exploración al final del episodio
         agent.update_exploration_rate()
 
         if agent.was_out_of_track:
+            print("ABANDONA EL CARRIL")
             break
 
-    restart(C, agent)
     agent.save_model(model_name)
     print("==================================")
     print("==================================")
-    print("ALCANZADO CHECKPOINT: ", str(agent.next_checkpoint -2))
+    print("FINALIZADO EN CHECKPOINT: ", str(agent.next_checkpoint))
     print("==================================")
     print("==================================")
+    restart(C, agent)
     C.shutdown()
