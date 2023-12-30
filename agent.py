@@ -24,6 +24,7 @@ class Agent:
         self.MAX_REWARD = 1000
         self.cruzaMetaInicio = False
         self.cercaFinal = False
+        self.sumCriticLoss = 0
 
         #CheckPoints
         self.lastCheckPointTime = 0.0
@@ -32,9 +33,9 @@ class Agent:
         self.lastReward = 0
 
         # Exploración disminute exponencialmente
-        self.exp_inicial = 1
+        self.exp_inicial = 0.3
         self.exp_tasa = self.exp_inicial
-        self.min_exp = 0
+        self.min_exp = 0.05
         self.exp_decay = 0.995
 
 
@@ -98,7 +99,7 @@ class Agent:
         # Normalizar CurLapTime, LastLapTime
         normalized_state.extend([self.normalize_tanh(s / max_lap_time) for s in state[8:10]])
 
-        normalized_state = np.nan_to_num(normalized_state, nan=-1)
+        # normalized_state = np.nan_to_num(normalized_state, nan=-1)
 
         return normalized_state
 
@@ -220,17 +221,15 @@ class Agent:
             if not self.was_out_of_track:
                 reward = -100
                 self.was_out_of_track = True
-        #     # Si ya estaba fuera, premio por acercarse. Castigo si no se acerca
-        # #     else:
-        # #         reward = (abs(previous_track_pos) - abs(track_pos)) * 10
-        # #         if reward <= 0.1:
-        # #             reward = -0.1
-        # # else:
-        # #     # Si antes estaba fuera -> PREMIO
-        # #     if self.was_out_of_track:
-        # #         print("ENTRA EN CARRIL")
-        # #         reward = 0.1
-        # #         self.was_out_of_track = False
+                print("SALE DEL CARRIL")
+            # Si ya estaba fuera, premio por acercarse. Castigo si no se acerca
+            else:
+                    reward = -1
+        else:
+            # Si antes estaba fuera -> PREMIO
+            if self.was_out_of_track:
+                print("ENTRA EN CARRIL")
+                self.was_out_of_track = False
 
         if self.next_checkpoint > self.track_length and current_dist < 100 :
                     self.next_checkpoint = 1
@@ -328,29 +327,29 @@ class Agent:
         return min(reward, self.MAX_REWARD)
 
 
-
-        return min(reward, self.MAX_REWARD)
-
-    def train(self, state, action, reward, done):
+    def train(self, state, next_state, action, reward, done):
 
         state_tensor = torch.tensor(state, dtype=torch.float)
+        next_state_tensor = torch.tensor(next_state, dtype=torch.float)
         action_tensor = torch.tensor(action, dtype=torch.float)
         reward_tensor = torch.tensor(reward, dtype=torch.float)
 
         # Predecir la acción usando la red del Actor
         self.actor_model.train()
-        predicted_action = self.actor_model(state_tensor)
+        predicted_action = self.actor_model(next_state_tensor)
 
 
         # Evaluar la acción usando la red del Crítico
         self.critic_model.train()
         value = self.critic_model(state_tensor, action_tensor)
-        predicted_value = self.critic_model(state_tensor, predicted_action)
+        predicted_value = self.critic_model(next_state_tensor, predicted_action)
 
         target_value = reward_tensor
         if not done:
             target_value = reward_tensor + 0.95 * predicted_value
         critic_loss = torch.nn.functional.mse_loss(value, target_value)
+
+        self.sumCriticLoss += critic_loss
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -367,7 +366,7 @@ class Agent:
         # print("ACCION ACTOR: ", predicted_action)
         # print("MI REWARD: ", reward_tensor)
         # print("REWARD CRITICO REAL: ", value)
-        # print("REWARD CRITICO DEL ACTOR: ", predicted_value)
+        print("REWARD CRITICO DEL ACTOR: ", predicted_value)
         # print("ACTOR LOSS: ", actor_loss)
         # print("CRITIC LOSS: ", critic_loss)
         # print("++++++++++++++++++++++++++++++++++++++++++++")

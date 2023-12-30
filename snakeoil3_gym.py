@@ -60,6 +60,7 @@ import os
 import time
 import numpy as np
 from agent import Agent
+import math
 
 PI= 3.14159265359
 
@@ -130,7 +131,7 @@ class Client():
         self.trackname= 'unknown'
         self.stage= 3 # 0=Warm-up, 1=Qualifying 2=Race, 3=unknown <Default=3>
         self.debug= False
-        self.maxSteps= 200000  # 50steps/second
+        self.maxSteps= 100000  # 50steps/second
         self.parse_the_command_line()
         if H: self.host= H
         if p: self.port= p
@@ -596,20 +597,25 @@ def drive(C, agent):
 
     # Si tu agente también controla el cambio de marchas
     if agent.control_gear:
+        if math.isnan(action[3]):
+            print("NaN DETECTADO")
+            print(state)
+            C.R.d['gear'] = 3
+            C.R.d['clutch'] = 0
+            restart(C,agent)
+            return action
         C.R.d['gear'] = int(((action[3] + 1) * 3.5)-1)
         C.R.d['clutch'] = (action[4] + 1) / 2
 
     C.R.d['meta'] = 0
 
-    print("TORCS ACTION: ", [C.R.d['steer'], C.R.d['accel'], C.R.d['brake'], C.R.d['gear'], C.R.d['clutch']])
+    # print("TORCS ACTION: ", [C.R.d['steer'], C.R.d['accel'], C.R.d['brake'], C.R.d['gear'], C.R.d['clutch']])
     # Enviar las acciones al simulador TORCS
     C.respond_to_server()
 
     return action
 
 def restart(C, agent):
-    action = agent.act(state)
-
 
     C.R.d['meta'] = 1 
 
@@ -666,7 +672,7 @@ def is_car_off_track(track_pos):
 if __name__ == "__main__":
     model_name ="modelo1"
     C = Client(p=3101)
-    agent = Agent(dim_action=5, dim_observation=31, learning_rate=0.1, model_file =model_name)    
+    agent = Agent(dim_action=5, dim_observation=31, learning_rate=0.01, model_file =model_name)    
 
     done = False
 
@@ -679,15 +685,19 @@ if __name__ == "__main__":
 
         reward = agent.update_reward(state)
 
+        C.get_servers_input()
+        next_state = get_state(C) 
+        next_state = agent.normalize_state(next_state)
+
         # Entrena el agente con la recompensa obtenida
-        agent.train(state, action, reward, done)
+        agent.train(state, next_state, action, reward, done)
 
         # Actualiza la tasa de exploración al final del episodio
         agent.update_exploration_rate()
 
-        if agent.was_out_of_track:
-            print("ABANDONA EL CARRIL")
-            break
+        # if agent.was_out_of_track:
+        #     print("ABANDONA EL CARRIL")
+        #     break
 
     agent.save_model(model_name)
     print("==================================")
@@ -695,5 +705,6 @@ if __name__ == "__main__":
     print("FINALIZADO EN CHECKPOINT: ", str(agent.next_checkpoint))
     print("==================================")
     print("==================================")
+    print("SUMCRITICLOSS: ", agent.sumCriticLoss)
     restart(C, agent)
     C.shutdown()
